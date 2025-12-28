@@ -1,28 +1,58 @@
-name: Windows-RDP
+name: Windows-RDP-Sentioo
 
-on: workflow_dispatch # Permite activarlo manualmente
+on: 
+  workflow_dispatch: # Permite iniciarlo manualmente desde la pestaña Actions
 
 jobs:
   build:
     runs-on: windows-latest
     steps:
-    - name: Descargando e Instalando Ngrok
+    - name: 1. Descargando Ngrok
       run: |
         Invoke-WebRequest https://bin.equinox.io/c/4VmDzA7iaHb/ngrok-stable-windows-amd64.zip -OutFile ngrok.zip
         Expand-Archive ngrok.zip
-    - name: Autenticando Ngrok
+
+    - name: 2. Autenticando Ngrok
       run: .\ngrok\ngrok.exe authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
-    - name: Habilitando Acceso RDP
+
+    - name: 3. Configurando Usuario y RDP
       run: |
+        # Establece una contraseña para el usuario actual (runneradmin)
+        net user runneradmin ContrasenaSegura123!
+        # Habilita el Escritorio Remoto en el Registro
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
         Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 1
-    - name: Creando Túnel Ngrok
-      run: Start-Process .\ngrok\ngrok.exe -ArgumentList "tcp 3389"
-    - name: Mantener Vivo y Mostrar Credenciales
+
+    - name: 4. Iniciando Túnel y Mostrando IP
+      shell: pwsh
       run: |
-        $lue = (Get-Content -Path  C:\Users\runneradmin\.ngrok2\ngrok.yml -ErrorAction SilentlyContinue)
-        Write-Host "Usuario: runneradmin"
-        Write-Host "Contraseña: (La que definas o usa la de por defecto del sistema)"
-        cmd /c "control userpasswords2" # Esto es para que la sesión no se cierre
-        powershell -NoExit
+        # Iniciar Ngrok en segundo plano apuntando al puerto RDP (3389)
+        Start-Process .\ngrok\ngrok.exe -ArgumentList "tcp --region us 3389"
+        
+        # Esperar a que el túnel se establezca
+        Start-Sleep -Seconds 12
+        
+        # Consultar la API interna de Ngrok para obtener la dirección pública
+        $ngrok_url = (Invoke-RestMethod http://127.0.0.1:4040/api/tunnels).tunnels.public_url
+        $clean_url = $ngrok_url.Replace("tcp://", "")
+        
+        Write-Host ""
+        Write-Host "=========================================================="
+        Write-Host " DATOS DE CONEXIÓN PARA SENTIO DESKTOP"
+        Write-Host "=========================================================="
+        Write-Host " IP/HOST: $clean_url"
+        Write-Host " USUARIO: runneradmin"
+        Write-Host " PASSWORD: ContrasenaSegura123!"
+        Write-Host "=========================================================="
+        Write-Host ""
+
+    - name: 5. Mantener Sesión Activa
+      run: |
+        # Bucle infinito para que la Action no termine (máximo 6 horas)
+        $i = 0
+        while($i -lt 360) {
+          Write-Host "RDP Activo... $(Get-Date)"
+          Start-Sleep -Seconds 60
+          $i++
+        }
