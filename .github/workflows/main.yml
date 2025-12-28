@@ -1,71 +1,115 @@
-name: RDP with Ngrok
+name: RDP with LocalTunnel
 
-on:
-  workflow_dispatch:  # Permite ejecución manual
-  # Para ejecución automática en push (opcional):
-  # push:
-  #   branches: [ main ]
+on: workflow_dispatch
 
 jobs:
-  setup-rdp:
+  rdp-localtunnel:
     runs-on: windows-latest
+    timeout-minutes: 60
     
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      
-    - name: Setup Ngrok
-      run: |
-        # Descargar y configurar Ngrok
-        Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" -OutFile ngrok.zip
-        Expand-Archive ngrok.zip
-        .\ngrok\ngrok.exe authtoken ${{ secrets.NGROK_AUTH_TOKEN }}
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
         
-    - name: Configure Windows Remote Desktop
+    - name: Install LocalTunnel
+      run: |
+        npm install -g localtunnel
+        # También necesitarás el cliente RDP expuesto
+        
+    - name: Configure RDP
       run: |
         # Habilitar RDP
         Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
         Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
         
-        # Configurar credenciales (cambia 'user' y 'pass' por tus valores)
-        $username = "Administrator"
-        $password = "P@ssw0rd123!"  # Cambia esta contraseña
+        # Crear usuario temporal
+        $password = "TempRDP$((Get-Date -Format 'HHmmss'))"
+        $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
+        New-LocalUser -Name "githubuser" -Password $securePassword
+        Add-LocalGroupMember -Group "Administrators" -Member "githubuser"
+        Enable-LocalUser -Name "githubuser"
         
-        # Crear usuario si no existe (opcional)
-        $userExists = Get-LocalUser -Name $username -ErrorAction SilentlyContinue
-        if (-not $userExists) {
-          $securePassword = ConvertTo-SecureString $password -AsPlainText -Force
-          New-LocalUser -Name $username -Password $securePassword
-          Add-LocalGroupMember -Group "Administrators" -Member $username
-        }
+        echo "USERNAME=githubuser" >> $env:GITHUB_ENV
+        echo "PASSWORD=$password" >> $env:GITHUB_ENV
         
-        # Habilitar cuenta
-        Enable-LocalUser -Name $username
+    - name: Create RDP proxy with Python
+      run: |
+        # Instalar Python si es necesario
+        choco install python -y --no-progress
+        python -m pip install flask
+        
+        # Crear script proxy
+        $proxyScript = @"
+import socket
+import threading
+import sys
+from flask import Flask, render_template_string
+
+app = Flask(__name__)
+
+# Variables globales para el proxy
+client_socket = None
+server_socket = None
+
+HTML_TEMPLATE = '''
+<!DOCTYPE html>
+<html>
+<head>
+    <title>RDP Connection Info</title>
+</head>
+<body>
+    <h1>RDP Connection Information</h1>
+    <p><strong>Host:</strong> {{hostname}}</p>
+    <p><strong>Port:</strong> {{port}}</p>
+    <p><strong>Username:</strong> {{username}}</p>
+    <p><strong>Password:</strong> {{password}}</p>
+    <hr>
+    <p>Use this information in your RDP client</p>
+</body>
+</html>
+'''
+
+@app.route('/')
+def index():
+    return render_template_string(HTML_TEMPLATE, 
+        hostname="localhost",
+        port="3389",
+        username="${{ env.USERNAME }}",
+        password="${{ env.PASSWORD }}")
+
+def start_flask():
+    app.run(host='0.0.0.0', port=8080)
+
+if __name__ == '__main__':
+    flask_thread = threading.Thread(target=start_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
+    
+    # También exponer el RDP con localtunnel
+    import subprocess
+    subprocess.run(["lt", "--port", "3389", "--subdomain", "rdp-${{ github.run_id }}"], shell=True)
+"@
+        
+        Set-Content -Path "proxy.py" -Value $proxyScript
+        
+    - name: Start RDP exposure
+      run: |
+        # Iniciar el proxy en segundo plano
+        Start-Process python -ArgumentList "proxy.py" -NoNewWindow
+        
+        # También usar localtunnel directamente
+        npx localtunnel --port 3389 --subdomain rdp-${{ github.run_id }} &
         
         # Mostrar información
-        Write-Host "Usuario: $username"
-        Write-Host "Contraseña: $password"
+        Write-Host "================================================"
+        Write-Host "RDP EXPOSED VIA LOCALTUNNEL"
+        Write-Host "================================================"
+        Write-Host "URL: https://rdp-${{ github.run_id }}.loca.lt"
+        Write-Host "Username: ${{ env.USERNAME }}"
+        Write-Host "Password: ${{ env.PASSWORD }}"
+        Write-Host "================================================"
         
-    - name: Start Ngrok tunnel for RDP
-      run: |
-        # Iniciar túnel Ngrok para RDP (puerto 3389)
-        Start-Process -FilePath ".\ngrok\ngrok.exe" -ArgumentList "tcp 3389" -NoNewWindow
-        
-        # Esperar a que Ngrok se inicie
-        Start-Sleep -Seconds 5
-        
-        # Obtener URL pública del túnel
-        $tunnelInfo = Invoke-RestMethod -Uri "http://localhost:4040/api/tunnels"
-        $publicUrl = $tunnelInfo.tunnels[0].public_url
-        
-        # Mostrar información de conexión
-        Write-Host "========================================="
-        Write-Host "RDP CONNECTION INFO:"
-        Write-Host "Public URL: $publicUrl"
-        Write-Host "Username: Administrator"
-        Write-Host "Password: P@ssw0rd123!"  # Usa la misma contraseña del paso anterior
-        Write-Host "========================================="
-        
-        # Mantener el workflow activo (60 minutos máximo)
-        Write-Host "RDP session will be available for 60 minutes..."
-        Start-Sleep -Seconds 3540  # 59 minutos
+        # Mantener sesión activa
+        Start-Sleep -Seconds 3540
